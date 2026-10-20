@@ -52,6 +52,29 @@ need_tool() {
     return 1
 }
 
+needs_math_library() {
+    local file
+    local math_pattern='(#include[[:space:]]*<math.h>|sin[[:space:]]*\(|cos[[:space:]]*\(|tan[[:space:]]*\(|sqrt[[:space:]]*\(|pow[[:space:]]*\(|exp[[:space:]]*\(|log[[:space:]]*\(|log10[[:space:]]*\(|floor[[:space:]]*\(|ceil[[:space:]]*\(|fabs[[:space:]]*\()'
+
+    for file in "${SOURCES[@]}"; do
+        if grep -Eiq "$math_pattern" "$file" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+output_has_trailing_newline() {
+    local file="$1"
+    [[ -s "$file" ]] || return 1
+    local last_byte
+    last_byte="$(tail -c 1 "$file" | od -An -t x1 | tr -d ' \n')"
+    case "$last_byte" in
+        0a|0d) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 summary() {
     printf '\n========== РЕЗУЛЬТАТ ==========\n'
     printf 'Успешно: %d | Ошибок: %d | Предупреждений: %d\n' \
@@ -127,8 +150,9 @@ EOF
         # Стандарт Школы 21: чистый Google style.
         cat > "$config" <<'EOF'
 ---
-Language: Cpp
 BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 110
 EOF
     fi || { fail "Не удалось создать $config"; return 1; }
 
@@ -244,6 +268,11 @@ compile_project() {
         read -r -a extra <<< "$CCHECK_CFLAGS"
         flags+=("${extra[@]}")
     fi
+    if needs_math_library; then
+        if ! printf '%s\n' "${flags[@]}" | grep -Fqx -- '-lm'; then
+            flags+=(-lm)
+        fi
+    fi
     [[ "$mode" == asan ]] && flags+=(-fsanitize=address -fno-omit-frame-pointer)
 
     info "$compiler ${flags[*]} ${src[*]} -o $output"
@@ -262,20 +291,39 @@ run_program() {
     head1 'Запуск программы'
     local binary; binary="$(resolve_binary "${1:-}")"
     local -a run_args=() launcher=()
-    local status=0
+    local stdout_file stderr_file status=0
 
     [[ -x "$binary" ]] || { fail "Нет исполняемого файла '$binary'."; return 1; }
     [[ -n "${CCHECK_RUN_ARGS:-}" ]] && read -r -a run_args <<< "$CCHECK_RUN_ARGS"
     command -v timeout >/dev/null 2>&1 && launcher=(timeout "${CCHECK_TIMEOUT:-60}")
 
+    stdout_file="$(mktemp)"
+    stderr_file="$(mktemp)"
     info "Запуск: $binary ${run_args[*]-}"
-    "${launcher[@]+"${launcher[@]}"}" "$binary" ${run_args[@]+"${run_args[@]}"} </dev/null || status=$?
+    "${launcher[@]+"${launcher[@]}"}" "$binary" ${run_args[@]+"${run_args[@]}"} </dev/null >"$stdout_file" 2>"$stderr_file" || status=$?
+
+    if [[ -s "$stderr_file" ]]; then
+        cat "$stderr_file" >&2
+    fi
 
     case "$status" in
-        0)   ok 'Программа завершилась с кодом 0'; return 0 ;;
+        0)
+            if output_has_trailing_newline "$stdout_file"; then
+                fail 'Вывод программы заканчивается переводом строки. Требование: вывод не должен заканчиваться \n или \r.'
+                rm -f "$stdout_file" "$stderr_file"
+                return 1
+            fi
+            if [[ -s "$stdout_file" ]]; then
+                cat "$stdout_file"
+            fi
+            ok 'Программа завершилась с кодом 0';
+            rm -f "$stdout_file" "$stderr_file"
+            return 0
+            ;;
         124) fail "Превышен лимит времени ${CCHECK_TIMEOUT:-60} с." ;;
-        *)   fail "Программа завершилась с кодом $status." ;;
+        *)   if [[ -s "$stdout_file" ]]; then cat "$stdout_file"; fi; fail "Программа завершилась с кодом $status." ;;
     esac
+    rm -f "$stdout_file" "$stderr_file"
     return 1
 }
 
