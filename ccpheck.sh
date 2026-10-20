@@ -150,8 +150,9 @@ EOF
         # Стандарт Школы 21: чистый Google style.
         cat > "$config" <<'EOF'
 ---
-Language: Cpp
 BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 110
 EOF
     fi || { fail "Не удалось создать $config"; return 1; }
 
